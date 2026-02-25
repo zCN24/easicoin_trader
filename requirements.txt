@@ -1,0 +1,6 @@
+aiohttp>=3.9
+pydantic>=2.7
+pydantic-settings>=2.2
+loguru>=0.7
+rich>=13.7
+textual>=0.70
