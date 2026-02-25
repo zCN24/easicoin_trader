@@ -1,6 +1,6 @@
 # EasiCoin 永续合约交易终端
 
-这是一个基于 Python 3.11+ 的异步量化交易终端示例，包含 REST/WS 客户端、服务层、Pydantic 模型以及 Textual 控制台 TUI。
+这是一个基于 Python 3.11+ 的异步量化交易终端，包含 REST/WS 客户端、服务层、Pydantic 模型以及 Textual 控制台 TUI。
 
 ## 功能特性
 
