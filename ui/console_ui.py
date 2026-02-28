@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import random
 from dataclasses import dataclass
+from typing import Optional
 
 from rich.align import Align
 from rich.console import RenderableType
@@ -11,6 +13,11 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Input, Static
+
+from core.api_client import EasiCoinClient
+from services.market_service import MarketService
+from services.order_service import OrderService
+from services.position_service import PositionService
 
 
 @dataclass
@@ -104,6 +111,11 @@ class EasiCoinTerminal(App[None]):
 
     BINDINGS = [("q", "quit", "退出")]
 
+    client: Optional[EasiCoinClient] = None
+    market_service: Optional[MarketService] = None
+    order_service: Optional[OrderService] = None
+    position_service: Optional[PositionService] = None
+
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static(id="status")
@@ -123,19 +135,17 @@ class EasiCoinTerminal(App[None]):
         yield Input(placeholder="buy 0.01 BTCUSDT @ market | close all | leverage 20", id="cmd")
         yield Footer()
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         self._setup_tables()
-        self._last_price = 67000.0
-        self._balance = 1200.5
-        self._leverage = 10
-        self._conn_status = "connected"
-        self._positions: list[PositionRow] = [
-            PositionRow("BTCUSDT", 0.01, 66500.0, 12.4),
-            PositionRow("ETHUSDT", 0.2, 3500.0, -3.1),
-        ]
-        self._tickers = self._generate_tickers()
-        self._depth = self._generate_depth(self._last_price)
-        self.set_interval(0.5, self._refresh_ui)
+        self._last_price = 0.0
+        self._balance = 0.0
+        self._leverage = 0
+        self._conn_status = "connecting"
+        self._positions: list[PositionRow] = []
+        self._tickers: list[TickerRow] = []
+        self._depth: tuple[list[DepthLevel], list[DepthLevel]] = ([], [])
+        await self._pull_market()
+        self.set_interval(5, lambda: asyncio.create_task(self._pull_market()))
         self._refresh_ui()
 
     def _setup_tables(self) -> None:
@@ -155,36 +165,47 @@ class EasiCoinTerminal(App[None]):
         positions.clear(columns=True)
         positions.add_columns("交易对", "持仓量", "开仓价", "盈亏")
 
-    def _generate_tickers(self) -> list[TickerRow]:
-        symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
-        base = {
-            "BTCUSDT": 67000.0,
-            "ETHUSDT": 3500.0,
-            "SOLUSDT": 120.0,
-            "BNBUSDT": 420.0,
-            "XRPUSDT": 0.6,
-        }
-        rows: list[TickerRow] = []
-        for sym in symbols:
-            last = base[sym] * (1 + random.uniform(-0.002, 0.002))
-            change = random.uniform(-1.8, 1.8)
-            rows.append(TickerRow(sym, last, change))
-        return rows
-
-    def _generate_depth(self, price: float) -> tuple[list[DepthLevel], list[DepthLevel]]:
-        bids = [DepthLevel(price - i * 2, random.uniform(0.1, 1.2)) for i in range(1, 8)]
-        asks = [DepthLevel(price + i * 2, random.uniform(0.1, 1.2)) for i in range(1, 8)]
-        return bids, asks
+    async def _pull_market(self) -> None:
+        """拉取行情与持仓，失败时保持现有数据。"""
+        if self.market_service is None:
+            return
+        try:
+            tickers = await self.market_service.get_tickers()
+            self._tickers = [TickerRow(t.symbol, t.last_price, 0.0) for t in tickers]
+            top_symbol = tickers[0].symbol if tickers else "BTCUSDT"
+            depth = await self.market_service.get_depth(top_symbol, limit=20)
+            bids = [DepthLevel(float(l.price), float(l.size)) for l in depth.bids]
+            asks = [DepthLevel(float(l.price), float(l.size)) for l in depth.asks]
+            self._depth = (bids, asks)
+            self._last_price = tickers[0].last_price if tickers else self._last_price
+            if self.client:
+                balance_raw = await self.client.get_account_balance()
+                balance_list = balance_raw.get("list", []) if isinstance(balance_raw, dict) else balance_raw
+                if balance_list:
+                    self._balance = float(balance_list[0].get("available_balance", 0) or balance_list[0].get("availableBalance", 0) or balance_list[0].get("wallet_balance", 0))
+            if self.position_service:
+                positions = await self.position_service.get_positions()
+                self._positions = [
+                    PositionRow(
+                        p.symbol,
+                        p.size,
+                        p.entry_price,
+                        p.unrealized_pnl,
+                    )
+                    for p in positions
+                ]
+            self._conn_status = "connected"
+        except Exception as exc:  # pragma: no cover - UI best-effort
+            self._conn_status = "error"
+            self._notify(f"数据刷新失败: {exc}")
 
     def _refresh_ui(self) -> None:
-        self._last_price *= 1 + random.uniform(-0.0006, 0.0006)
-        self._tickers = self._generate_tickers()
-        self._depth = self._generate_depth(self._last_price)
         self._update_status()
         self._update_tickers()
         self._update_depth_tables()
         self._update_positions()
-        self.query_one(KlinePanel).push_price(self._last_price)
+        if self._last_price > 0:
+            self.query_one(KlinePanel).push_price(self._last_price)
 
     def _update_status(self) -> None:
         status = self.query_one("#status", Static)
@@ -214,8 +235,12 @@ class EasiCoinTerminal(App[None]):
         book_table.clear()
         bids, asks = self._depth
         for bid, ask in zip(bids, asks, strict=False):
-            depth_table.add_row(f"{bid.price:.2f}", f"{bid.size:.3f}", f"{ask.price:.2f}", f"{ask.size:.3f}")
-            book_table.add_row(f"{bid.price:.2f}", f"{bid.size:.3f}", f"{ask.price:.2f}", f"{ask.size:.3f}")
+            bid_price = f"{bid.price:.2f}" if bid else ""
+            bid_size = f"{bid.size:.3f}" if bid else ""
+            ask_price = f"{ask.price:.2f}" if ask else ""
+            ask_size = f"{ask.size:.3f}" if ask else ""
+            depth_table.add_row(bid_price, bid_size, ask_price, ask_size)
+            book_table.add_row(bid_price, bid_size, ask_price, ask_size)
 
     def _update_positions(self) -> None:
         table = self.query_one("#positions", DataTable)
@@ -287,7 +312,7 @@ class NotifyScreen(Screen):
         yield Static(self._panel, id="notify-panel")
 
     async def on_mount(self) -> None:
-        await self.sleep(1.2)
+        await asyncio.sleep(1.2)
         self.app.pop_screen()
 
 

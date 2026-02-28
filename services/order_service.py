@@ -15,85 +15,61 @@ class OrderService:
         symbol: str,
         side: OrderSide,
         price: float,
-        size: float,
-        time_in_force: str = "GTC",
+        qty: float,
+        position_idx: int = 1,
+        time_in_force: str = "GoodTillCancel",
         reduce_only: bool = False,
-        client_order_id: Optional[str] = None,
+        order_link_id: Optional[str] = None,
     ) -> Order:
-        """下限价单。
-
-        参数:
-            symbol: 交易对，例如 BTCUSDT。
-            side: 方向，buy 或 sell。
-            price: 限价价格，必须大于 0。
-            size: 下单数量，必须大于 0。
-            time_in_force: 订单生效策略，常见 GTC/IOC/FOK。
-            reduce_only: 是否只减仓。
-            client_order_id: 自定义订单 ID，可选。
-
-        返回:
-            Order: 下单结果。
-        """
         if not symbol:
             raise ValueError("symbol 不能为空")
         if price <= 0:
             raise ValueError("price 必须大于 0")
-        if size <= 0:
-            raise ValueError("size 必须大于 0")
-        if not time_in_force:
-            raise ValueError("time_in_force 不能为空")
+        if qty <= 0:
+            raise ValueError("qty 必须大于 0")
 
         payload: dict[str, Any] = {
             "symbol": symbol,
-            "side": side.value,
-            "type": "limit",
-            "price": price,
-            "size": size,
-            "timeInForce": time_in_force,
-            "reduceOnly": reduce_only,
+            "side": side.value.capitalize(),
+            "position_idx": position_idx,
+            "order_type": "Limit",
+            "price": str(price),
+            "qty": str(qty),
+            "time_in_force": time_in_force,
+            "reduce_only": reduce_only,
         }
-        if client_order_id:
-            payload["clientOrderId"] = client_order_id
+        if order_link_id:
+            payload["order_link_id"] = order_link_id
 
-        data = await self._client.post("order/place", data=payload)
+        data = await self._client.create_order(payload)
         return Order.model_validate(data)
 
     async def place_market_order(
         self,
         symbol: str,
         side: OrderSide,
-        size: float,
+        qty: float,
+        position_idx: int = 1,
         reduce_only: bool = False,
-        client_order_id: Optional[str] = None,
+        order_link_id: Optional[str] = None,
     ) -> Order:
-        """下市价单。
-
-        参数:
-            symbol: 交易对。
-            side: 方向，buy 或 sell。
-            size: 下单数量，必须大于 0。
-            reduce_only: 是否只减仓。
-            client_order_id: 自定义订单 ID，可选。
-
-        返回:
-            Order: 下单结果。
-        """
         if not symbol:
             raise ValueError("symbol 不能为空")
-        if size <= 0:
-            raise ValueError("size 必须大于 0")
+        if qty <= 0:
+            raise ValueError("qty 必须大于 0")
 
         payload: dict[str, Any] = {
             "symbol": symbol,
-            "side": side.value,
-            "type": "market",
-            "size": size,
-            "reduceOnly": reduce_only,
+            "side": side.value.capitalize(),
+            "position_idx": position_idx,
+            "order_type": "Market",
+            "qty": str(qty),
+            "reduce_only": reduce_only,
         }
-        if client_order_id:
-            payload["clientOrderId"] = client_order_id
+        if order_link_id:
+            payload["order_link_id"] = order_link_id
 
-        data = await self._client.post("order/place", data=payload)
+        data = await self._client.create_order(payload)
         return Order.model_validate(data)
 
     async def cancel_order(self, order_id: str) -> Order:
@@ -108,7 +84,7 @@ class OrderService:
         if not order_id:
             raise ValueError("order_id 不能为空")
 
-        data = await self._client.post("order/cancel", data={"orderId": order_id})
+        data = await self._client.cancel_order({"order_id": order_id})
         return Order.model_validate(data)
 
     async def cancel_all(self, symbol: Optional[str] = None) -> list[Order]:
@@ -123,7 +99,9 @@ class OrderService:
         payload: dict[str, Any] = {}
         if symbol:
             payload["symbol"] = symbol
-        data = await self._client.post("order/cancel-all", data=payload)
+        data = await self._client.cancel_all_orders(payload)
+        if isinstance(data, dict) and "list" in data:
+            data = data["list"]
         return [Order.model_validate(item) for item in data]
 
     async def get_open_orders(self, symbol: Optional[str] = None, limit: int = 50) -> list[Order]:
@@ -142,8 +120,9 @@ class OrderService:
         params: dict[str, Any] = {"limit": limit}
         if symbol:
             params["symbol"] = symbol
-        data = await self._client.get("order/open-orders", params=params)
-        return [Order.model_validate(item) for item in data]
+        data = await self._client.get_activity_orders(params)
+        items = data.get("list", []) if isinstance(data, dict) else data
+        return [Order.model_validate(item) for item in items]
 
     async def get_order_history(
         self,
@@ -176,9 +155,10 @@ class OrderService:
         if symbol:
             params["symbol"] = symbol
         if start_time is not None:
-            params["startTime"] = start_time
+            params["start_time"] = start_time
         if end_time is not None:
-            params["endTime"] = end_time
+            params["end_time"] = end_time
 
-        data = await self._client.get("order/history", params=params)
-        return [Order.model_validate(item) for item in data]
+        data = await self._client.get_orders(params)
+        items = data.get("list", []) if isinstance(data, dict) else data
+        return [Order.model_validate(item) for item in items]

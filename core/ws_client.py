@@ -59,13 +59,9 @@ class EasiCoinWSClient:
     def queue(self) -> asyncio.Queue[dict[str, Any]]:
         return self._queue
 
-    def _sign(self, timestamp_ms: int, payload: str) -> str:
-        message = f"{timestamp_ms}{self._api_key}{self._recv_window}{payload}"
-        digest = hmac.new(
-            self._api_secret.encode("utf-8"),
-            message.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
+    def _sign_ws(self, expires_ms: int) -> str:
+        message = f"GET/realtime{expires_ms}"
+        digest = hmac.new(self._api_secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).hexdigest()
         return digest
 
     async def connect_public(self) -> None:
@@ -117,20 +113,11 @@ class EasiCoinWSClient:
     async def _login(self, state: _WSState) -> None:
         if state.ws is None:
             raise RuntimeError("WS is not connected")
-        timestamp_ms = int(time.time() * 1000)
-        payload = ""
-        signature = self._sign(timestamp_ms, payload)
-        login_msg = {
-            "op": "login",
-            "args": {
-                "apiKey": self._api_key,
-                "timestamp": str(timestamp_ms),
-                "recvWindow": str(self._recv_window),
-                "sign": signature,
-            },
-        }
+        expires = int((time.time() + 60) * 1000)
+        signature = self._sign_ws(expires)
+        login_msg = {"op": "auth", "args": [self._api_key, expires, signature]}
         await state.ws.send_json(login_msg)
-        logger.info("WS login sent")
+        logger.info("WS auth sent")
 
     async def _reader_loop(self, state: _WSState) -> None:
         backoff = self._reconnect_delay
@@ -161,7 +148,7 @@ class EasiCoinWSClient:
                 if state.ws is None:
                     raise RuntimeError("WS is not connected")
                 await asyncio.sleep(self._heartbeat_interval)
-                await state.ws.send_json({"op": "ping", "ts": int(time.time() * 1000)})
+                await state.ws.send_json({"op": "ping"})
             except asyncio.CancelledError:
                 return
             except Exception as exc:
@@ -199,23 +186,37 @@ class EasiCoinWSClient:
         await self._send_unsubscribe(state, [topic])
 
     def _pick_state(self, channel: str) -> _WSState:
-        if channel in {"position", "order", "account"}:
+        if channel in {"position", "order", "execution", "wallet"}:
             return self._private
         return self._public
 
     def _build_topic(self, channel: str, symbol: Optional[str], interval: Optional[str]) -> str:
-        if channel in {"ticker", "depth", "trade"}:
+        if channel == "ticker":
             if not symbol:
                 raise ValueError("symbol 不能为空")
-            return f"{channel}:{symbol}"
+            return f"tickers-100.{symbol}"
+        if channel == "depth":
+            if not symbol:
+                raise ValueError("symbol 不能为空")
+            return f"ob_snap_shot.{symbol}.1"
         if channel == "kline":
             if not symbol:
                 raise ValueError("symbol 不能为空")
             if not interval:
                 raise ValueError("interval 不能为空")
-            return f"kline:{symbol}:{interval}"
-        if channel in {"position", "order", "account"}:
-            return channel
+            return f"candle.{interval}.{symbol}"
+        if channel == "trade":
+            if not symbol:
+                raise ValueError("symbol 不能为空")
+            return f"trades-100.{symbol}"
+        if channel == "position":
+            return "contract.position"
+        if channel == "order":
+            return "contract.order"
+        if channel == "execution":
+            return "contract.execution"
+        if channel == "wallet":
+            return "contract.wallet"
         raise ValueError("未知频道")
 
     async def _send_subscribe(self, state: _WSState, topics: list[str]) -> None:

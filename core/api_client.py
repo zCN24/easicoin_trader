@@ -13,6 +13,13 @@ from loguru import logger
 
 
 class EasiCoinClient:
+    """Async REST client for EasiCoin contract API.
+
+    Implements authentication per official docs:
+    Access-Sign = HMAC_SHA256(secret, timestamp + Access-Key + Recv-Window + payload)
+    payload: GET => raw querystring; POST => raw json body string.
+    """
+
     def __init__(
         self,
         api_key: str,
@@ -81,6 +88,15 @@ class EasiCoinClient:
             "Accept": "application/json",
         }
 
+    def _unwrap(self, resp_json: Any) -> Any:
+        if isinstance(resp_json, dict) and "code" in resp_json:
+            code = resp_json.get("code")
+            if code not in (0, "0"):
+                raise RuntimeError(f"API error code={code} msg={resp_json.get('message')}")
+            if "data" in resp_json:
+                return resp_json["data"]
+        return resp_json
+
     async def _request(
         self,
         method: str,
@@ -100,7 +116,10 @@ class EasiCoinClient:
 
         for attempt in range(1, self._max_retries + 1):
             timestamp_ms = int(time.time() * 1000)
-            headers = self._auth_headers(timestamp_ms, payload)
+            headers = self._auth_headers(timestamp_ms, payload) if self._api_key else {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
             logger.info(
                 "HTTP {method} {url} attempt={attempt}/{max_retries}",
                 method=method_upper,
@@ -125,7 +144,8 @@ class EasiCoinClient:
                     text_body = await resp.text()
                     if 200 <= resp.status < 300:
                         if "application/json" in resp.headers.get("Content-Type", ""):
-                            return json.loads(text_body) if text_body else {}
+                            parsed = json.loads(text_body) if text_body else {}
+                            return self._unwrap(parsed)
                         return text_body
 
                     logger.error(
@@ -151,49 +171,157 @@ class EasiCoinClient:
     async def post(self, path: str, data: Optional[dict[str, Any]] = None) -> Any:
         return await self._request("POST", path, data=data)
 
-    async def put(self, path: str, data: Optional[dict[str, Any]] = None) -> Any:
-        return await self._request("PUT", path, data=data)
+    # ---------- Public Market ----------
+    async def get_instruments(self, symbol: Optional[str] = None) -> Any:
+        params = {"symbol": symbol} if symbol else None
+        return await self.get("futures/public/v1/instruments", params=params)
 
-    async def delete(self, path: str, params: Optional[dict[str, Any]] = None) -> Any:
-        return await self._request("DELETE", path, params=params)
+    async def get_tickers(self, symbol: Optional[str] = None) -> Any:
+        params = {"symbol": symbol} if symbol else None
+        return await self.get("futures/public/v1/market/tickers", params=params)
 
-    async def get_server_time(self) -> Any:
-        return await self.get("public/time")
-
-    async def get_tickers(self) -> Any:
-        return await self.get("market/tickers")
-
-    async def get_depth(self, symbol: str, limit: int = 20) -> Any:
-        return await self.get("market/depth", params={"symbol": symbol, "limit": limit})
+    async def get_depth(self, symbol: str, depth: int = 20) -> Any:
+        if not symbol:
+            raise ValueError("symbol 不能为空")
+        if depth <= 0 or depth > 25:
+            raise ValueError("depth 必须在 1-25 之间")
+        params = {"symbol": symbol, "depth": depth}
+        return await self.get("futures/public/v1/market/order-book", params=params)
 
     async def get_kline(
         self,
         symbol: str,
         interval: str,
-        start_time: Optional[int] = None,
-        end_time: Optional[int] = None,
-        limit: Optional[int] = None,
+        start: Optional[int] = None,
+        end: Optional[int] = None,
+        limit: int = 100,
     ) -> Any:
-        params: dict[str, Any] = {"symbol": symbol, "interval": interval}
-        if start_time is not None:
-            params["startTime"] = start_time
-        if end_time is not None:
-            params["endTime"] = end_time
-        if limit is not None:
-            params["limit"] = limit
-        return await self.get("market/kline", params=params)
+        if not symbol:
+            raise ValueError("symbol 不能为空")
+        if not interval:
+            raise ValueError("interval 不能为空")
+        if limit <= 0 or limit > 100:
+            raise ValueError("limit 必须在 1-100 之间")
+        params: dict[str, Any] = {"symbol": symbol, "interval": interval, "limit": limit}
+        if start is not None:
+            params["start"] = start
+        if end is not None:
+            params["end"] = end
+        return await self.get("futures/public/v1/market/kline", params=params)
 
-    async def get_account_balance(self) -> Any:
-        return await self.get("account/balance")
+    async def get_mark_price_kline(
+        self,
+        symbol: str,
+        interval: str,
+        start: Optional[int] = None,
+        end: Optional[int] = None,
+        limit: int = 100,
+    ) -> Any:
+        params: dict[str, Any] = {"symbol": symbol, "interval": interval, "limit": limit}
+        if start is not None:
+            params["start"] = start
+        if end is not None:
+            params["end"] = end
+        return await self.get("futures/public/v1/market/mark-price-kline", params=params)
 
-    async def get_positions(self) -> Any:
-        return await self.get("position/list")
+    async def get_trades(self, symbol: str, limit: int = 50) -> Any:
+        if not symbol:
+            raise ValueError("symbol 不能为空")
+        if limit <= 0 or limit > 100:
+            raise ValueError("limit 必须在 1-100 之间")
+        params = {"symbol": symbol, "limit": limit}
+        return await self.get("futures/public/v1/market/trades", params=params)
 
-    async def place_order(self, payload: dict[str, Any]) -> Any:
-        return await self.post("order/place", data=payload)
+    async def get_funding_history(self, symbol: str, limit: int = 100, start: Optional[int] = None, end: Optional[int] = None) -> Any:
+        params: dict[str, Any] = {"symbol": symbol, "limit": limit}
+        if start is not None:
+            params["from"] = start
+        if end is not None:
+            params["to"] = end
+        return await self.get("futures/public/v1/market/funding-rate-history", params=params)
 
-    async def cancel_order(self, order_id: str) -> Any:
-        return await self.post("order/cancel", data={"orderId": order_id})
+    # ---------- Account (private) ----------
+    async def get_fee_rate(self, symbol: Optional[str] = None, coin: Optional[str] = None) -> Any:
+        params: dict[str, Any] = {}
+        if symbol:
+            params["symbol"] = symbol
+        if coin:
+            params["coin"] = coin
+        return await self.get("futures/private/v1/account/fee-rate", params=params or None)
 
-    async def close_position(self, symbol: str) -> Any:
-        return await self.post("position/close", data={"symbol": symbol})
+    async def get_account_balance(self, coin: Optional[str] = None) -> Any:
+        params = {"coin": coin} if coin else None
+        return await self.get("futures/private/v1/account/balance", params=params)
+
+    # ---------- Position (private) ----------
+    async def get_positions(self, symbol: Optional[str] = None, coin: Optional[str] = None) -> Any:
+        params: dict[str, Any] = {}
+        if symbol:
+            params["symbol"] = symbol
+        if coin:
+            params["coin"] = coin
+        return await self.get("futures/private/v1/position/list", params=params or None)
+
+    async def switch_position_mode(self, coin: str, position_mode: str) -> Any:
+        return await self.post("futures/private/v1/position/switch-separate-mode", data={"coin": coin, "position_mode": position_mode})
+
+    async def set_leverage(self, symbol: str, buy_leverage: Optional[int] = None, sell_leverage: Optional[int] = None, pz_link_id: Optional[str] = None) -> Any:
+        payload: dict[str, Any] = {"symbol": symbol}
+        if buy_leverage is not None:
+            payload["buy_leverage"] = buy_leverage
+        if sell_leverage is not None:
+            payload["sell_leverage"] = sell_leverage
+        if pz_link_id:
+            payload["pz_link_id"] = pz_link_id
+        return await self.post("futures/private/v1/position/set-leverage", data=payload)
+
+    async def set_margin_mode(self, symbol: str, margin_mode: str) -> Any:
+        return await self.post("futures/private/v1/position/switch-margin-mode", data={"symbol": symbol, "margin_mode": margin_mode})
+
+    async def adjust_margin(self, symbol: str, position_idx: int, margin: str, pz_link_id: Optional[str] = None) -> Any:
+        payload: dict[str, Any] = {"symbol": symbol, "position_idx": position_idx, "margin": margin}
+        if pz_link_id:
+            payload["pz_link_id"] = pz_link_id
+        return await self.post("futures/private/v1/position/add-margin", data=payload)
+
+    async def create_tpsl(self, payload: dict[str, Any]) -> Any:
+        return await self.post("futures/private/v1/position/create-tpsl", data=payload)
+
+    async def replace_tpsl(self, payload: dict[str, Any]) -> Any:
+        return await self.post("futures/private/v1/position/replace-tpsl", data=payload)
+
+    async def get_closed_pnl(self, symbol: Optional[str] = None, coin: Optional[str] = None, start: Optional[int] = None, end: Optional[int] = None, limit: int = 100, cursor: Optional[str] = None) -> Any:
+        params: dict[str, Any] = {"limit": limit}
+        if symbol:
+            params["symbol"] = symbol
+        if coin:
+            params["coin"] = coin
+        if start:
+            params["start_time"] = start
+        if end:
+            params["end_time"] = end
+        if cursor:
+            params["cursor"] = cursor
+        return await self.get("futures/private/v1/position/closed-pnl", params=params)
+
+    # ---------- Order (private) ----------
+    async def create_order(self, payload: dict[str, Any]) -> Any:
+        return await self.post("futures/private/v1/create-order", data=payload)
+
+    async def replace_order(self, payload: dict[str, Any]) -> Any:
+        return await self.post("futures/private/v1/replace-order", data=payload)
+
+    async def cancel_order(self, payload: dict[str, Any]) -> Any:
+        return await self.post("futures/private/v1/cancel-order", data=payload)
+
+    async def cancel_all_orders(self, payload: dict[str, Any]) -> Any:
+        return await self.post("futures/private/v1/cancel-all-orders", data=payload)
+
+    async def get_activity_orders(self, params: Optional[dict[str, Any]] = None) -> Any:
+        return await self.get("futures/private/v1/trade/activity-orders", params=params)
+
+    async def get_orders(self, params: Optional[dict[str, Any]] = None) -> Any:
+        return await self.get("futures/private/v1/trade/orders", params=params)
+
+    async def get_fills(self, params: Optional[dict[str, Any]] = None) -> Any:
+        return await self.get("futures/private/v1/trade/fills", params=params)
