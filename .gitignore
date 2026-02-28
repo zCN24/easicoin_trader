@@ -1,1 +1,19 @@
-/.venv
+# Python 字节码缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境
+.venv/
+venv/
+ENV/
+env/
+
+# 其他常见忽略
+*.egg-info/
+dist/
+build/
+*.egg
+data/
+logs/
+.env

@@ -102,23 +102,23 @@ class EasiCoinTerminal(App[None]):
     }
     """
 
-    BINDINGS = [("q", "quit", "Quit")]
+    BINDINGS = [("q", "quit", "退出")]
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static(id="status")
         with Horizontal(id="root"):
             with Vertical(id="left"):
-                yield Static("Market", classes="section-title")
+                yield Static("市场", classes="section-title")
                 yield DataTable(id="tickers")
-                yield Static("Depth", classes="section-title")
+                yield Static("深度", classes="section-title")
                 yield DataTable(id="depth")
             with Vertical(id="center"):
                 yield KlinePanel()
             with Vertical(id="right"):
-                yield Static("Order Book", classes="section-title")
+                yield Static("订单簿", classes="section-title")
                 yield DataTable(id="orderbook")
-                yield Static("My Positions", classes="section-title")
+                yield Static("我的持仓", classes="section-title")
                 yield DataTable(id="positions")
         yield Input(placeholder="buy 0.01 BTCUSDT @ market | close all | leverage 20", id="cmd")
         yield Footer()
@@ -141,19 +141,19 @@ class EasiCoinTerminal(App[None]):
     def _setup_tables(self) -> None:
         tickers = self.query_one("#tickers", DataTable)
         tickers.clear(columns=True)
-        tickers.add_columns("Symbol", "Last", "Change")
+        tickers.add_columns("交易对", "最新价", "涨跌幅")
 
         depth = self.query_one("#depth", DataTable)
         depth.clear(columns=True)
-        depth.add_columns("Bid", "Size", "Ask", "Size")
+        depth.add_columns("买价", "买量", "卖价", "卖量")
 
         book = self.query_one("#orderbook", DataTable)
         book.clear(columns=True)
-        book.add_columns("Bid", "Size", "Ask", "Size")
+        book.add_columns("买价", "买量", "卖价", "卖量")
 
         positions = self.query_one("#positions", DataTable)
         positions.clear(columns=True)
-        positions.add_columns("Symbol", "Size", "Entry", "PNL")
+        positions.add_columns("交易对", "持仓量", "开仓价", "盈亏")
 
     def _generate_tickers(self) -> list[TickerRow]:
         symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
@@ -189,10 +189,10 @@ class EasiCoinTerminal(App[None]):
     def _update_status(self) -> None:
         status = self.query_one("#status", Static)
         text = (
-            f"Balance: {self._balance:.2f} USDT  |  "
-            f"Positions: {len(self._positions)}  |  "
-            f"Leverage: {self._leverage}x  |  "
-            f"Connection: {self._conn_status.upper()}"
+            f"资产: {self._balance:.2f} USDT  |  "
+            f"持仓数: {len(self._positions)}  |  "
+            f"杠杆: {self._leverage}倍  |  "
+            f"连接状态: {self._conn_status.upper()}"
         )
         status.update(text)
 
@@ -243,24 +243,24 @@ class EasiCoinTerminal(App[None]):
         keyword = parts[0].lower()
         if keyword == "close" and len(parts) >= 2 and parts[1].lower() == "all":
             self._positions.clear()
-            self._notify("All positions closed")
+            self._notify("已全部平仓")
             return
         if keyword == "leverage" and len(parts) == 2:
             try:
                 value = int(parts[1])
             except ValueError:
-                self._notify("Invalid leverage")
+                self._notify("杠杆输入无效")
                 return
             if value <= 0:
-                self._notify("Leverage must be positive")
+                self._notify("杠杆必须为正数")
                 return
             self._leverage = value
-            self._notify(f"Leverage set to {value}x")
+            self._notify(f"杠杆已设置为 {value}倍")
             return
         if keyword == "buy" or keyword == "sell":
-            self._notify(f"Order received: {command}")
+            self._notify(f"已收到订单: {command}")
             return
-        self._notify("Unknown command")
+        self._notify("未知命令")
 
     def _notify(self, message: str) -> None:
         banner = Panel(Text(message, style="bold #e8c547"), border_style="#2b3a42")
