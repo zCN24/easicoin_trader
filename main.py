@@ -126,7 +126,7 @@ def main() -> None:
     for order in grid_orders:
         _append_trade_csv({
             "timestamp": int(time.time() * 1000),
-            "symbol": order["symbol"],
+            "symbol": order["symbol"], 
             "side": order["side"],
             "price": order["price"],
             "size": order["size"],
